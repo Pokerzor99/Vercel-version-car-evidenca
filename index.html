@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="sl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Evidenca vzdrževanja vozila</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail" aria-label="Glavna navigacija">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div class="brand-text">
+          <span class="brand-title">Evidenca</span>
+          <span class="brand-sub">vzdrževanje</span>
+        </div>
+      </div>
+      <div class="rail-tools">
+        <button type="button" class="theme-toggle" id="themeToggle" title="Preklopi ozadje" aria-pressed="false">
+          <span class="theme-toggle__icon" aria-hidden="true">◐</span>
+          <span class="theme-toggle__label">Temno ozadje</span>
+        </button>
+        <div class="zoom-control">
+          <select id="zoomSelect" class="zoom-select" title="Velikost prikaza aplikacije" aria-label="Velikost prikaza aplikacije">
+            <option value="1">100 % (privzeto)</option>
+            <option value="1.25">125 %</option>
+            <option value="1.5">150 %</option>
+            <option value="1.75">175 %</option>
+            <option value="2">200 %</option>
+          </select>
+        </div>
+      </div>
+      <nav class="rail-nav">
+        <button type="button" class="rail-link is-active" data-panel="vehicles" data-title="Vozila" data-lead="Dodaj vozilo in urejaj evidenco. Kilometri se posodabljajo iz servisnih zapisov.">
+          Vozila
+        </button>
+        <button type="button" class="rail-link" data-panel="plans" data-title="Načrti vzdrževanja" data-lead="Dodaj ali prilagodi intervale servisov za posamezno vozilo.">
+          Načrti vzdrževanja
+        </button>
+        <button type="button" class="rail-link" data-panel="records" data-title="Servisni zapisi" data-lead="Vnašaj popravila in servise – trenutni kilometri vozila se prilagodijo.">
+          Servisni zapisi
+        </button>
+        <button type="button" class="rail-link" data-panel="overview" data-title="Pregled Evidence" data-lead="Zapadlost, zgodovina, graf vrednosti in stroškov; izberi vozilo.">
+          Pregled Evidence
+        </button>
+        <button type="button" class="rail-link" data-panel="vinjeta" data-title="Vinjete" data-lead="Vnesi veljavnost vinjet (SI/AT), preveri e-vinjeto na DARS in odpri portal v novem zavihku po potrebi.">
+          Vinjete
+        </button>
+      </nav>
+    </aside>
+
+    <div class="workspace">
+      <header class="workspace-header">
+        <h1 class="page-title" id="pageTitle">Vozila</h1>
+        <p class="page-lead" id="pageLead">Dodaj vozilo in urejaj evidenco. Kilometri se posodabljajo iz servisnih zapisov.</p>
+      </header>
+
+      <!-- Panel: Vozila — obrazec | seznam v mreži -->
+      <div id="panel-vehicles" class="panel is-active">
+        <div class="layout-split">
+          <section class="card card--elevated">
+            <h2 id="vehicleFormHeading" class="card-title">Dodaj vozilo</h2>
+            <p class="hint">Kilometri ob vnosu so začetna vrednost. <strong>Trenutni kilometri</strong> se nato samodejno nastavijo na največje število kilometrov med tem vnosom in vsemi servisnimi zapisi.</p>
+            <form id="vehicleForm" class="grid two">
+              <input type="hidden" name="vehicleId" id="vehicleFormVehicleId" value="" />
+              <label>Tablica<input name="nickname" required placeholder="npr. LJ 12-ABC" /></label>
+              <label>Letnik<input name="year" type="number" required min="1900" max="2100" /></label>
+              <label>Znamka<input name="make" required placeholder="Toyota" /></label>
+              <label>Model<input name="model" required placeholder="Camry" /></label>
+              <label class="full">Referenčna tržna vrednost (EUR, opcijsko)
+                <input name="referenceMarketValue" type="number" min="0" step="100" placeholder="Ocena z avto.net / mobile.de" />
+              </label>
+              <p class="field-hint full">Če pustiš prazno, graf uporabi informativno oceno glede na letnik in kilometre. Primerjaj cene na avto.net ali mobile.de.</p>
+              <label class="full">Kilometri ob vnosu v evidenco<input name="currentMileage" type="number" required min="0" /></label>
+              <div class="full btn-row">
+                <button type="submit" id="vehicleFormSubmitBtn">Dodaj vozilo</button>
+                <button type="button" class="secondary" id="cancelVehicleEditBtn" hidden>Prekliči urejanje</button>
+              </div>
+            </form>
+          </section>
+          <section class="card card--elevated">
+            <h2 class="card-title">Vaša vozila</h2>
+            <div id="vehicleList" class="stack"></div>
+          </section>
+        </div>
+      </div>
+
+      <div id="panel-plans" class="panel">
+        <section class="card card--elevated card--narrow">
+          <h2 class="card-title">Dodaj plan vzdrževanja</h2>
+          <form id="planForm" class="grid two">
+            <label>Vozilo
+              <select name="vehicleId" required id="planVehicleSelect"></select>
+            </label>
+            <label>Vrsta servisa
+              <select name="type" required id="planTypeSelect"></select>
+            </label>
+            <label>Interval (kilometri)
+              <input name="intervalMiles" type="number" min="0" placeholder="5000" />
+            </label>
+            <label>Interval (dnevi)
+              <input name="intervalDays" type="number" min="0" placeholder="180" />
+            </label>
+            <div class="full plan-form-footer">
+              <label class="plan-note-field">Pripomba (opcijsko)
+                <textarea name="planNotes" rows="3" placeholder="Opomba k temu načrtu vzdrževanja…"></textarea>
+              </label>
+              <div class="plan-form-footer__btn">
+                <button type="submit">Dodaj plan</button>
+              </div>
+            </div>
+          </form>
+        </section>
+      </div>
+
+      <div id="panel-vinjeta" class="panel">
+        <section class="card card--elevated">
+          <h2 class="card-title">Vinjete</h2>
+          <p class="hint">
+            Najprej <strong>izberi vozilo</strong>. Nato lahko vpišeš veljavnost <strong>vinjete za Slovenijo</strong> in/ali <strong>za Avstrijo</strong>
+            (datum <strong>dd/mm/yyyy</strong>). Polja, ki jih ne potrebuješ, pusti prazna.
+          </p>
+          <div class="vinjeta-panel-step stack">
+            <label class="full">Katero vozilo želiš urediti?
+              <select id="vinjetaPanelVehicleSelect" aria-label="Vozilo za vnos vinjet"></select>
+            </label>
+            <div id="vinjetaPanelForm" class="vinjeta-panel-form" hidden>
+              <p id="vinjetaPanelVehicleSummary" class="vinjeta-panel-summary" aria-live="polite"></p>
+              <div class="vinjeta-manage-fields">
+                <label class="full">Slovenija – velja do
+                  <input type="text" id="vinjetaPanelSi" placeholder="dd/mm/yyyy" autocomplete="off" inputmode="numeric" />
+                  <span class="field-hint">Pusti prazno, če ne vodiš slovenske vinjete.</span>
+                </label>
+                <label class="full">Avstrija – velja do
+                  <input type="text" id="vinjetaPanelAt" placeholder="dd/mm/yyyy" autocomplete="off" inputmode="numeric" />
+                  <span class="field-hint">Pusti prazno, če ne vodiš avstrijske vinjete.</span>
+                </label>
+              </div>
+              <div class="btn-row" style="margin-top: 1rem">
+                <button type="button" id="vinjetaPanelSaveBtn">Shrani vinjete za to vozilo</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card card--elevated card--vinjeta-bar">
+          <div class="vinjeta-bar-inner">
+            <div class="vinjeta-bar-text">
+              <h3 class="vinjeta-bar-title">e-Vinjeta (DARS)</h3>
+              <p class="hint vinjeta-bar-hint">
+                Preveri veljavnost na portalu DARS (vgrajeno okno). Če ostane prazno, portal morda ne dovoli vgradnje –
+                <a
+                  class="external-link"
+                  href="https://evinjeta.dars.si/selfcare/sl/check-validity/request"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >odpri DARS v novem zavihku</a
+                >.
+              </p>
+            </div>
+            <div class="vinjeta-bar-actions">
+              <label class="vinjeta-select-label">Vozilo
+                <select id="vinjetaVehicleSelect" aria-label="Vozilo za preverjanje vinjete"></select>
+              </label>
+              <button type="button" id="vinjetaOpenBtn" class="vinjeta-open-btn">Preveri vinjeto</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="panel-records" class="panel">
+        <section class="card card--elevated card--narrow">
+          <h2 class="card-title">Dodaj servisni zapis</h2>
+          <form id="recordForm" class="grid two">
+            <label>Vozilo
+              <select name="vehicleId" required id="recordVehicleSelect"></select>
+            </label>
+            <label>Vrsta servisa
+              <select name="type" required id="recordTypeSelect"></select>
+            </label>
+            <label>Datum
+              <input name="serviceDate" type="text" required placeholder="dd/mm/yyyy" inputmode="numeric" autocomplete="off" />
+              <span class="field-hint">Evropski zapis: dan / mesec / leto (dd/mm/yyyy)</span>
+            </label>
+            <label>Kilometri<input name="mileageAtService" type="number" min="0" required /></label>
+            <label>Cena (EUR)<input name="cost" type="number" min="0" step="0.01" placeholder="75.00" /></label>
+            <label>Servis<input name="shopName" placeholder="Avto servis" /></label>
+            <label class="full">Opombe<textarea name="notes" rows="2" placeholder="Neobvezne opombe..."></textarea></label>
+            <input type="hidden" name="recordId" id="recordFormRecordId" value="" />
+            <div class="full btn-row">
+              <button type="submit" id="recordFormSubmitBtn">Dodaj zapis</button>
+              <button type="button" class="secondary" id="cancelRecordEditBtn" hidden>Prekliči urejanje</button>
+            </div>
+          </form>
+        </section>
+      </div>
+
+      <div id="panel-overview" class="panel">
+        <div class="overview-toolbar card card--flat">
+          <div class="overview-toolbar-inner">
+            <label class="filter-label filter-label--inline">Vozilo za prikaz
+              <select id="filterVehicleSelect">
+                <option value="">Vsa vozila</option>
+              </select>
+            </label>
+            <p class="hint overview-hint">Prikaže zapadlost in zgodovino samo za izbrano vozilo.</p>
+          </div>
+        </div>
+
+        <section class="card card--elevated" id="planEditCard" hidden>
+          <h2 class="card-title">Uredi plan vzdrževanja</h2>
+          <form id="planEditForm" class="grid two">
+            <input type="hidden" name="planId" id="planEditPlanId" />
+            <label class="full plan-edit-summary" id="planEditSummary"></label>
+            <label>Interval (kilometri)
+              <input name="intervalMiles" type="number" min="0" id="planEditIntervalMiles" />
+            </label>
+            <label>Interval (dnevi)
+              <input name="intervalDays" type="number" min="0" id="planEditIntervalDays" />
+            </label>
+            <label>Zadnji servis – datum
+              <input name="lastServiceDate" type="text" id="planEditLastDate" placeholder="dd/mm/yyyy" inputmode="numeric" autocomplete="off" />
+              <span class="field-hint">dd/mm/yyyy</span>
+            </label>
+            <label class="full">Pripomba k načrtu
+              <textarea name="planNotes" rows="2" id="planEditNotes" placeholder="Opcijsko…"></textarea>
+            </label>
+            <label>Zadnji servis – kilometri
+              <input name="lastServiceMileage" type="number" min="0" id="planEditLastMileage" />
+            </label>
+            <div class="full btn-row">
+              <button type="submit">Shrani plan</button>
+              <button type="button" class="secondary" id="cancelPlanEditBtn">Prekliči</button>
+            </div>
+          </form>
+        </section>
+
+        <div class="overview-grid-wrap">
+          <div class="overview-main-grid">
+            <section class="card card--elevated">
+              <h2 class="card-title">Pregled zapadlosti</h2>
+              <div id="dueDashboard" class="stack"></div>
+            </section>
+            <section class="card card--elevated">
+              <h2 class="card-title">Zgodovina servisov</h2>
+              <div id="historyList" class="stack"></div>
+            </section>
+          </div>
+          <aside class="overview-chart-sidebar card card--elevated" id="overviewChartAside">
+            <h2 class="card-title">Vrednost in stroški</h2>
+            <p class="hint" id="chartHint">Izberi vozilo zgoraj za graf ocene vrednosti in skupnih stroškov servisa.</p>
+            <div class="chart-wrap">
+              <canvas id="valueChart" height="200" aria-label="Graf vrednosti in stroškov"></canvas>
+            </div>
+            <p class="field-hint chart-disclaimer" id="chartDisclaimer"></p>
+            <div class="chart-links">
+              <a id="avtoNetLink" class="external-link" href="#" target="_blank" rel="noopener noreferrer">Primerjaj na avto.net</a>
+              <a id="mobileDeLink" class="external-link" href="#" target="_blank" rel="noopener noreferrer">Iskanje na mobile.de</a>
+            </div>
+          </aside>
+        </div>
+
+        <section class="card card--elevated overview-vinjeta-block">
+          <h2 class="card-title">Pregled vinjet (Evidence)</h2>
+          <p class="hint">Tabela veljavnosti za vsa vozila v izbranem filtru zgoraj (če je »Vsa vozila«, za vsa vnešena vozila). Datume vneseš v meniju <strong>Vinjete</strong>.</p>
+          <div id="vinjetaEvidenceTable" class="vinjeta-evidence-wrap"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <template id="vehicleItemTemplate">
+    <article class="vehicle-item">
+      <div class="vehicle-item-main">
+        <h3 class="vehicle-title"></h3>
+        <p class="vehicle-mileage"></p>
+        <p class="hint vehicle-mileage-note">Trenutni kilometri se posodabljajo samodejno iz servisnih zapisov.</p>
+      </div>
+      <div class="item-actions">
+        <button type="button" class="secondary btn-small" data-action="edit-vehicle">Uredi</button>
+        <button type="button" class="danger btn-small" data-action="delete-vehicle">Izbriši</button>
+      </div>
+    </article>
+  </template>
+
+  <div id="vinjetaModal" class="vinjeta-modal" hidden aria-hidden="true">
+    <div class="vinjeta-modal-backdrop" id="vinjetaModalBackdrop" tabindex="-1"></div>
+    <div
+      class="vinjeta-modal-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="vinjetaModalTitle"
+    >
+      <header class="vinjeta-modal-header">
+        <button type="button" class="secondary" id="vinjetaModalClose">Zapri</button>
+        <h2 id="vinjetaModalTitle" class="vinjeta-modal-title">Preveri vinjeto</h2>
+        <span class="vinjeta-modal-header-spacer" aria-hidden="true"></span>
+      </header>
+      <p class="vinjeta-modal-plate" id="vinjetaModalPlate"></p>
+      <div class="vinjeta-modal-body">
+        <div id="vinjetaLoader" class="vinjeta-loader">
+          <span class="vinjeta-spinner" aria-hidden="true"></span>
+          <span>Nalaganje …</span>
+        </div>
+        <iframe
+          id="vinjetaIframe"
+          class="vinjeta-iframe"
+          title="Preverjanje vinjete – DARS"
+          src="about:blank"
+        ></iframe>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <script src="./firebase-config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
