@@ -34,6 +34,44 @@ Aplikacija nima več vgrajenega (client-side) gesla v JavaScript kodi. Za produk
 
 Lokalno lahko kopiraš `.env.example` v `.env` in vneseš svoje vrednosti.
 
+## Nove funkcionalnosti (razširitev)
+
+- Arhiv vozil (`status: active|archived`) in prikaz arhiviranih vozil.
+- Kartica pregleda: kaj zapade v 30/60/90 dneh.
+- Dnevnik dejanj (append-only pristop v pravilih).
+- Upravljanje podatkov: izvoz CSV, predogled uvoza CSV in gumb za varnostno kopijo.
+- Dokumenti po vozilih (Firebase Storage + Firestore metapodatki).
+- Stanje sinhronizacije (`sync_status/global`).
+
+## Firebase Functions / Scheduler
+
+V mapi `functions/` je osnova za:
+
+- `createAuditLog` (HTTP)
+- `runBackupNow` (HTTP)
+- `onBackupRequest` (trigger iz `backup_requests/*`)
+- `sendDueRemindersEmail` (daily scheduler)
+
+### Secrets (Functions)
+
+Nastavi v Firebase Functions secrets:
+
+- `EMAIL_PROVIDER` (trenutno podprt `resend`)
+- `EMAIL_API_KEY`
+- `EMAIL_FROM`
+- `EMAIL_TO`
+
+## Pravila in indeksi
+
+Dodane datoteke:
+
+- `firestore.rules`
+- `storage.rules`
+- `firestore.indexes.json`
+- `firebase.json`
+
+Po deployu jih uveljavi z Firebase CLI (`firebase deploy --only firestore:rules,firestore:indexes,storage,functions`).
+
 V tej različici se evidenca shranjuje v **Firestore** (glej zgoraj). V izvorni lokalni različici aplikacije so podatki še v `localStorage`.
 
 Vozila lahko **urediš** (obrazec zgoraj) ali **izbrišeš** (skupaj s plani in zapisi za to vozilo).

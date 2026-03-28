@@ -32,7 +32,7 @@ function normalizeServiceTypeName(name) {
 }
 
 function freshState() {
-  return { vehicles: [], plans: [], records: [], types: [...DEFAULT_TYPES] };
+  return { vehicles: [], plans: [], records: [], types: [...DEFAULT_TYPES], syncStatus: null };
 }
 
 function migrateState(rawState) {
@@ -85,10 +85,29 @@ function migrateState(rawState) {
       v.currentMileage = computeVehicleCurrentMileage(v, recs);
       if (v.vinjetaValidUntilSI === undefined) v.vinjetaValidUntilSI = null;
       if (v.vinjetaValidUntilAT === undefined) v.vinjetaValidUntilAT = null;
+      if (v.registracijaValidUntil === undefined) v.registracijaValidUntil = null;
+      if (v.status !== "archived") v.status = "active";
     });
   }
 
   return rawState;
+}
+
+function isVehicleActive(v) {
+  return v && v.status !== "archived";
+}
+
+function getActiveVehicles() {
+  return state.vehicles.filter(isVehicleActive);
+}
+
+function getArchivedVehicles() {
+  return state.vehicles.filter((v) => v.status === "archived");
+}
+
+/** Samo aktivna vozila za izbirnike in delovne tokove. */
+function getActiveVehicleIdsSet() {
+  return new Set(getActiveVehicles().map((v) => v.id));
 }
 
 const EVINJETA_URL = "https://evinjeta.dars.si/selfcare/sl/check-validity/request";
@@ -119,7 +138,10 @@ function vehicleDocumentForFirestore(v) {
     model: v.model,
     referenceMarketValue: v.referenceMarketValue ?? null,
     baseMileage: v.baseMileage ?? null,
-    currentMileage: v.currentMileage ?? null
+    currentMileage: v.currentMileage ?? null,
+    status: v.status === "archived" ? "archived" : "active",
+    archivedAt: v.archivedAt ?? null,
+    archivedReason: v.archivedReason ?? null
   };
 }
 
@@ -178,14 +200,15 @@ async function persistFullStateToFirestore(db) {
   for (const v of state.vehicles) {
     writePromises.push(db.collection("vehicles").doc(v.id).set(vehicleDocumentForFirestore(v)));
     const vinRef = db.collection("vinjetas").doc(v.id);
-    if (!v.vinjetaValidUntilSI && !v.vinjetaValidUntilAT) {
+    if (!v.vinjetaValidUntilSI && !v.vinjetaValidUntilAT && !v.registracijaValidUntil) {
       writePromises.push(vinRef.delete());
     } else {
       writePromises.push(
         vinRef.set({
           vehicleId: v.id,
           si: v.vinjetaValidUntilSI || null,
-          at: v.vinjetaValidUntilAT || null
+          at: v.vinjetaValidUntilAT || null,
+          reg: v.registracijaValidUntil || null
         })
       );
     }
@@ -215,7 +238,7 @@ async function loadStateFromFirestore() {
   const vinMap = {};
   vinSnap.forEach((doc) => {
     const d = doc.data();
-    vinMap[doc.id] = { si: d.si ?? null, at: d.at ?? null };
+    vinMap[doc.id] = { si: d.si ?? null, at: d.at ?? null, reg: d.reg ?? null };
   });
 
   const vehicles = [];
@@ -233,7 +256,11 @@ async function loadStateFromFirestore() {
       baseMileage: d.baseMileage ?? null,
       currentMileage: d.currentMileage ?? null,
       vinjetaValidUntilSI: vin.si ?? d.vinjetaValidUntilSI ?? null,
-      vinjetaValidUntilAT: vin.at ?? d.vinjetaValidUntilAT ?? null
+      vinjetaValidUntilAT: vin.at ?? d.vinjetaValidUntilAT ?? null,
+      registracijaValidUntil: vin.reg ?? d.registracijaValidUntil ?? null,
+      status: d.status === "archived" ? "archived" : "active",
+      archivedAt: d.archivedAt ?? null,
+      archivedReason: d.archivedReason ?? null
     });
   });
 
@@ -268,6 +295,10 @@ async function loadStateFromFirestore() {
   });
 
   state = migrateState({ vehicles, plans, records, types: [...DEFAULT_TYPES] });
+  for (const plan of state.plans) {
+    recalculatePlanLastService(plan.vehicleId, plan.type);
+  }
+  await loadSyncStatusFromFirestore();
 }
 
 /** Zadnja izbira vozila v spustniku e-vinjeta (obnovi se ob renderju). */
@@ -275,6 +306,7 @@ let lastVinjetaVehicleId = null;
 
 /** Zadnja izbira vozila na panelu Vinjete (vnos datumov). */
 let lastVinjetaPanelVehicleId = null;
+let vinjetaPanelFeedbackTimeoutId = null;
 
 let vinjetaLoadTimeoutId = null;
 const THEME_KEY = "car-maintenance-theme";
@@ -282,6 +314,8 @@ const ZOOM_KEY = "car-maintenance-zoom";
 const ZOOM_LEVELS = [1, 1.25, 1.5, 1.75, 2];
 
 let valueChartInstance = null;
+let expandedHistoryRecordId = null;
+let pendingImportReport = null;
 
 /**
  * Trenutni km vozila = max(referenčni km ob vnosu v evidenco, najvišji km med servisnimi zapisi).
@@ -393,12 +427,115 @@ const refs = {
   vinjetaPanelVehicleSummary: document.getElementById("vinjetaPanelVehicleSummary"),
   vinjetaPanelSi: document.getElementById("vinjetaPanelSi"),
   vinjetaPanelAt: document.getElementById("vinjetaPanelAt"),
+  vinjetaPanelReg: document.getElementById("vinjetaPanelReg"),
   vinjetaPanelSaveBtn: document.getElementById("vinjetaPanelSaveBtn"),
-  vinjetaEvidenceTable: document.getElementById("vinjetaEvidenceTable")
+  vinjetaPanelSaveFeedback: document.getElementById("vinjetaPanelSaveFeedback"),
+  vinjetaEvidenceTable: document.getElementById("vinjetaEvidenceTable"),
+  dueSoonCardBody: document.getElementById("dueSoonCardBody"),
+  vehicleArchivedSection: document.getElementById("vehicleArchivedSection"),
+  vehicleArchivedList: document.getElementById("vehicleArchivedList"),
+  vaultVehicleForm: document.getElementById("vaultVehicleForm"),
+  vaultFileInput: document.getElementById("vaultFileInput"),
+  vaultUploadBtn: document.getElementById("vaultUploadBtn"),
+  vaultUploadHint: document.getElementById("vaultUploadHint"),
+  vaultDocumentsBody: document.getElementById("vaultDocumentsBody"),
+  auditDateFrom: document.getElementById("auditDateFrom"),
+  auditDateTo: document.getElementById("auditDateTo"),
+  auditQuickRange: document.getElementById("auditQuickRange"),
+  auditApplyFilterBtn: document.getElementById("auditApplyFilterBtn"),
+  auditLogBody: document.getElementById("auditLogBody"),
+  auditLogEmpty: document.getElementById("auditLogEmpty"),
+  lineLastSync: document.getElementById("lineLastSync"),
+  lineLastBackup: document.getElementById("lineLastBackup"),
+  btnExportCsv: document.getElementById("btnExportCsv"),
+  btnImportCsvTrigger: document.getElementById("btnImportCsvTrigger"),
+  csvImportInput: document.getElementById("csvImportInput"),
+  btnBackupNow: document.getElementById("btnBackupNow"),
+  importPreview: document.getElementById("importPreview"),
+  importPreviewText: document.getElementById("importPreviewText"),
+  btnImportApply: document.getElementById("btnImportApply"),
+  btnImportCancel: document.getElementById("btnImportCancel")
 };
 
 /** Izbrano vozilo za filter: "" = vsa. */
 let filterVehicleId = "";
+
+async function touchSuccessfulSync(db) {
+  try {
+    await db.collection("sync_status").doc("global").set(
+      { lastSuccessfulSyncAt: firebase.firestore.FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+    await loadSyncStatusFromFirestore();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function loadSyncStatusFromFirestore() {
+  const db = getFirestoreDb();
+  if (!db) return;
+  try {
+    const doc = await db.collection("sync_status").doc("global").get();
+    state.syncStatus = doc.exists ? doc.data() : {};
+    updateSyncStatusLines();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function formatFirestoreTime(val) {
+  if (val == null) return "—";
+  if (typeof val.toDate === "function") {
+    return formatDateEuropean(dateToIsoLocal(val.toDate()));
+  }
+  if (typeof val === "string") return formatDateEuropean(val.slice(0, 10));
+  return "—";
+}
+
+function updateSyncStatusLines() {
+  const s = state.syncStatus || {};
+  if (refs.lineLastSync) {
+    refs.lineLastSync.textContent = `Zadnja uspešna sinhronizacija: ${formatFirestoreTime(s.lastSuccessfulSyncAt)}`;
+  }
+  if (refs.lineLastBackup) {
+    refs.lineLastBackup.textContent = `Zadnja varnostna kopija: ${formatFirestoreTime(s.lastBackupAt)}`;
+  }
+}
+
+async function appendAuditLog(entry) {
+  const db = getFirestoreDb();
+  if (!db) return;
+  try {
+    await db.collection("audit_logs").add({
+      ts: firebase.firestore.FieldValue.serverTimestamp(),
+      actorType: "client",
+      actorId: "browser",
+      actionType: entry.actionType,
+      entityType: entry.entityType ?? null,
+      entityId: entry.entityId ?? null,
+      summary: entry.summary ?? "",
+      meta: entry.meta ?? null
+    });
+  } catch (e) {
+    console.error("appendAuditLog", e);
+  }
+}
+
+async function logAuditEntry(action, entity, summary) {
+  const db = getFirestoreDb();
+  if (!db) return;
+  try {
+    await db.collection("auditLog").add({
+      ts: new Date().toISOString(),
+      action,
+      entity,
+      summary
+    });
+  } catch (e) {
+    console.warn("Audit log failed:", e);
+  }
+}
 
 async function saveState() {
   const db = getFirestoreDb();
@@ -408,6 +545,7 @@ async function saveState() {
   }
   try {
     await persistFullStateToFirestore(db);
+    await touchSuccessfulSync(db);
   } catch (err) {
     console.error(err);
     alert("Napaka pri shranjevanju v oblak.");
@@ -476,12 +614,14 @@ function refreshVinjetaPanelUI() {
   const form = refs.vinjetaPanelForm;
   if (!sel || !form) return;
 
-  if (!state.vehicles.length) {
+  const activeVehicles = getActiveVehicles();
+  if (!activeVehicles.length) {
     sel.innerHTML = '<option value="">Najprej dodaj vozila na zavihku »Vozila«</option>';
     sel.disabled = true;
     form.hidden = true;
     if (refs.vinjetaPanelSi) refs.vinjetaPanelSi.value = "";
     if (refs.vinjetaPanelAt) refs.vinjetaPanelAt.value = "";
+    if (refs.vinjetaPanelReg) refs.vinjetaPanelReg.value = "";
     if (refs.vinjetaPanelVehicleSummary) refs.vinjetaPanelVehicleSummary.textContent = "";
     if (refs.vinjetaPanelSaveBtn) refs.vinjetaPanelSaveBtn.disabled = true;
     lastVinjetaPanelVehicleId = null;
@@ -489,13 +629,13 @@ function refreshVinjetaPanelUI() {
   }
 
   sel.disabled = false;
-  const vehicleOptions = state.vehicles
+  const vehicleOptions = activeVehicles
     .map((v) => `<option value="${escapeHtml(v.id)}">${escapeHtml(v.nickname)} (${v.year} ${v.make} ${v.model})</option>`)
     .join("");
   sel.innerHTML = `<option value="">Izberi vozilo …</option>${vehicleOptions}`;
 
   const keep =
-    lastVinjetaPanelVehicleId && state.vehicles.some((v) => v.id === lastVinjetaPanelVehicleId);
+    lastVinjetaPanelVehicleId && activeVehicles.some((v) => v.id === lastVinjetaPanelVehicleId);
   sel.value = keep ? lastVinjetaPanelVehicleId : "";
 
   applyVinjetaPanelSelection();
@@ -506,8 +646,9 @@ function applyVinjetaPanelSelection() {
   const form = refs.vinjetaPanelForm;
   const si = refs.vinjetaPanelSi;
   const at = refs.vinjetaPanelAt;
+  const reg = refs.vinjetaPanelReg;
   const sum = refs.vinjetaPanelVehicleSummary;
-  if (!sel || !form || !si || !at) return;
+  if (!sel || !form || !si || !at || !reg) return;
 
   const id = sel.value || "";
   lastVinjetaPanelVehicleId = id || null;
@@ -516,6 +657,7 @@ function applyVinjetaPanelSelection() {
     form.hidden = true;
     si.value = "";
     at.value = "";
+    reg.value = "";
     if (sum) sum.textContent = "";
     if (refs.vinjetaPanelSaveBtn) refs.vinjetaPanelSaveBtn.disabled = true;
     return;
@@ -535,6 +677,7 @@ function applyVinjetaPanelSelection() {
   }
   si.value = formatDateEuropean(v.vinjetaValidUntilSI);
   at.value = formatDateEuropean(v.vinjetaValidUntilAT);
+  reg.value = formatDateEuropean(v.registracijaValidUntil);
 }
 
 function renderVinjetaEvidenceBlocks() {
@@ -545,7 +688,7 @@ function renderVinjetaEvidenceBlocks() {
   const list = state.vehicles.filter((v) => allowed.has(v.id));
 
   if (!list.length) {
-    const msg = state.vehicles.length
+    const msg = getActiveVehicles().length
       ? "Ni vozil za izbran filter. Spremeni »Prikaži vozilo« zgoraj."
       : "Ni vozil v evidenci.";
     tableWrap.innerHTML = `<p class="hint">${msg}</p>`;
@@ -556,13 +699,16 @@ function renderVinjetaEvidenceBlocks() {
     .map((v) => {
       const stSI = vinjetaExpiryStatus(v.vinjetaValidUntilSI);
       const stAT = vinjetaExpiryStatus(v.vinjetaValidUntilAT);
+      const stReg = vinjetaExpiryStatus(v.registracijaValidUntil);
       const dSI = v.vinjetaValidUntilSI ? formatDateEuropean(v.vinjetaValidUntilSI) : "—";
       const dAT = v.vinjetaValidUntilAT ? formatDateEuropean(v.vinjetaValidUntilAT) : "—";
+      const dReg = v.registracijaValidUntil ? formatDateEuropean(v.registracijaValidUntil) : "—";
       return `<tr>
         <td><strong>${escapeHtml(v.nickname)}</strong></td>
         <td>${escapeHtml(String(v.year))} ${escapeHtml(v.make)} ${escapeHtml(v.model)}</td>
         <td>${escapeHtml(dSI)}<br><span class="${stSI.badgeClass}">${escapeHtml(stSI.label)}</span></td>
         <td>${escapeHtml(dAT)}<br><span class="${stAT.badgeClass}">${escapeHtml(stAT.label)}</span></td>
+        <td>${escapeHtml(dReg)}<br><span class="${stReg.badgeClass}">${escapeHtml(stReg.label)}</span></td>
       </tr>`;
     })
     .join("");
@@ -576,6 +722,7 @@ function renderVinjetaEvidenceBlocks() {
             <th>Vozilo</th>
             <th>Slovenija</th>
             <th>Avstrija</th>
+            <th>Registracija</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -595,6 +742,7 @@ async function saveVinjetaPanelForm() {
 
   const siRaw = refs.vinjetaPanelSi?.value?.trim() ?? "";
   const atRaw = refs.vinjetaPanelAt?.value?.trim() ?? "";
+  const regRaw = refs.vinjetaPanelReg?.value?.trim() ?? "";
 
   if (siRaw) {
     const p = parseServiceDateInput(siRaw);
@@ -618,8 +766,66 @@ async function saveVinjetaPanelForm() {
     v.vinjetaValidUntilAT = null;
   }
 
-  await saveState();
-  renderAll();
+  if (regRaw) {
+    const p = parseServiceDateInput(regRaw);
+    if (!p) {
+      alert(`Neveljaven datum za registracijo. Uporabi dd/mm/yyyy.`);
+      return;
+    }
+    v.registracijaValidUntil = p;
+  } else {
+    v.registracijaValidUntil = null;
+  }
+
+  const feedbackEl = refs.vinjetaPanelSaveFeedback;
+  if (feedbackEl) {
+    feedbackEl.hidden = true;
+    feedbackEl.textContent = "";
+    feedbackEl.classList.remove("vinjeta-save-feedback--success", "vinjeta-save-feedback--error");
+  }
+  clearTimeout(vinjetaPanelFeedbackTimeoutId);
+  vinjetaPanelFeedbackTimeoutId = null;
+
+  try {
+    const db = getFirestoreDb();
+    if (!db) {
+      throw new Error("Firestore ni na voljo");
+    }
+    await persistFullStateToFirestore(db);
+    const siDisp = v.vinjetaValidUntilSI ? formatDateEuropean(v.vinjetaValidUntilSI) : "—";
+    const atDisp = v.vinjetaValidUntilAT ? formatDateEuropean(v.vinjetaValidUntilAT) : "—";
+    const regDisp = v.registracijaValidUntil ? formatDateEuropean(v.registracijaValidUntil) : "—";
+    await logAuditEntry(
+      "SHRANJENO",
+      "Vinjeta / Registracija",
+      `${v.nickname} – SI: ${siDisp} AT: ${atDisp} Reg: ${regDisp}`
+    );
+    renderAll();
+    if (feedbackEl) {
+      feedbackEl.textContent = "Shranjeno ✓";
+      feedbackEl.classList.add("vinjeta-save-feedback--success");
+      feedbackEl.hidden = false;
+      vinjetaPanelFeedbackTimeoutId = setTimeout(() => {
+        feedbackEl.hidden = true;
+        feedbackEl.textContent = "";
+        feedbackEl.classList.remove("vinjeta-save-feedback--success", "vinjeta-save-feedback--error");
+        vinjetaPanelFeedbackTimeoutId = null;
+      }, 3000);
+    }
+  } catch (err) {
+    console.error(err);
+    if (feedbackEl) {
+      feedbackEl.textContent = "Napaka pri shranjevanju.";
+      feedbackEl.classList.add("vinjeta-save-feedback--error");
+      feedbackEl.hidden = false;
+      vinjetaPanelFeedbackTimeoutId = setTimeout(() => {
+        feedbackEl.hidden = true;
+        feedbackEl.textContent = "";
+        feedbackEl.classList.remove("vinjeta-save-feedback--success", "vinjeta-save-feedback--error");
+        vinjetaPanelFeedbackTimeoutId = null;
+      }, 3000);
+    }
+  }
 }
 
 function addDays(date, days) {
@@ -663,13 +869,158 @@ function statusLabel(status) {
   return "V REDU";
 }
 
+function startOfDay(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+/** Razlika v dneh od danes do ciljnega datuma (negativno = preteklost). */
+function daysFromTodayTo(isoDate) {
+  if (!isoDate || typeof isoDate !== "string") return null;
+  const end = toDate(isoDate);
+  if (!end || Number.isNaN(end.getTime())) return null;
+  const t = startOfDay(new Date());
+  const e = startOfDay(end);
+  return Math.round((e - t) / 86400000);
+}
+
+function dueSoonBucketForDays(days) {
+  if (days == null || Number.isNaN(days)) return null;
+  if (days < 0) return "overdue";
+  if (days <= 30) return "d30";
+  if (days <= 60) return "d60";
+  if (days <= 90) return "d90";
+  return null;
+}
+
+function dateToIsoLocal(d) {
+  if (!d || Number.isNaN(d.getTime())) return "";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Zbere elemente za kartico 30/60/90 (samo aktivna vozila).
+ */
+function collectDueSoonItems() {
+  const buckets = { overdue: [], d30: [], d60: [], d90: [] };
+  const add = (bucket, title, detail, plate) => {
+    if (!buckets[bucket]) return;
+    buckets[bucket].push({ title, detail, plate });
+  };
+
+  for (const vehicle of getActiveVehicles()) {
+    const plate = vehicle.nickname || vehicle.id;
+
+    for (const plan of state.plans.filter((p) => p.vehicleId === vehicle.id)) {
+      const intervalDays = Number(plan.intervalDays) || null;
+      const intervalMiles = Number(plan.intervalMiles) || null;
+      const lastMileage = Number(plan.lastServiceMileage);
+      const cur = Number(vehicle.currentMileage);
+
+      if (intervalMiles && Number.isFinite(lastMileage)) {
+        const dueM = lastMileage + intervalMiles;
+        if (cur >= dueM) {
+          add("overdue", `Plan: ${plan.type}`, `Zapadlo po km (rok ${dueM.toLocaleString("sl-SI")} km)`, plate);
+        }
+      }
+
+      if (intervalDays && plan.lastServiceDate) {
+        const last = toDate(plan.lastServiceDate);
+        if (last && !Number.isNaN(last.getTime())) {
+          const dueDate = addDays(last, intervalDays);
+          const days = Math.round((startOfDay(dueDate) - startOfDay(new Date())) / 86400000);
+          const b = dueSoonBucketForDays(days);
+          if (b) {
+            add(b, `Plan: ${plan.type}`, `Rok servisa: ${formatDateEuropean(dateToIsoLocal(dueDate))}`, plate);
+          }
+        }
+      }
+    }
+
+    if (vehicle.vinjetaValidUntilSI) {
+      const d = daysFromTodayTo(vehicle.vinjetaValidUntilSI);
+      const b = dueSoonBucketForDays(d);
+      if (b) add(b, "Vinjeta SI", `Veljavnost do ${formatDateEuropean(vehicle.vinjetaValidUntilSI)}`, plate);
+    }
+    if (vehicle.vinjetaValidUntilAT) {
+      const d = daysFromTodayTo(vehicle.vinjetaValidUntilAT);
+      const b = dueSoonBucketForDays(d);
+      if (b) add(b, "Vinjeta AT", `Veljavnost do ${formatDateEuropean(vehicle.vinjetaValidUntilAT)}`, plate);
+    }
+    if (vehicle.registracijaValidUntil) {
+      const d = daysFromTodayTo(vehicle.registracijaValidUntil);
+      const b = dueSoonBucketForDays(d);
+      if (b) add(b, "Registracija", `Veljavnost do ${formatDateEuropean(vehicle.registracijaValidUntil)}`, plate);
+    }
+  }
+
+  return buckets;
+}
+
+function renderDueSoonCard() {
+  const host = document.getElementById("dueSoonCardBody");
+  if (!host) return;
+  const buckets = collectDueSoonItems();
+  const sections = [
+    { key: "overdue", label: "Zapadlo" },
+    { key: "d30", label: "Do 30 dni" },
+    { key: "d60", label: "31–60 dni" },
+    { key: "d90", label: "61–90 dni" }
+  ];
+  const hasAny = sections.some((s) => buckets[s.key].length);
+  if (!hasAny) {
+    host.innerHTML = '<p class="hint">Ni elementov v izbranih oknih (samo aktivna vozila).</p>';
+    return;
+  }
+  host.innerHTML = sections
+    .map((s) => {
+      const rows = buckets[s.key];
+      if (!rows.length) return "";
+      const inner = rows
+        .map(
+          (r) => `
+        <tr>
+          <td><strong>${escapeHtml(r.plate)}</strong></td>
+          <td>${escapeHtml(r.title)}</td>
+          <td>${escapeHtml(r.detail)}</td>
+        </tr>`
+        )
+        .join("");
+      return `
+      <div class="due-soon-bucket">
+        <h3 class="due-soon-bucket-title">${escapeHtml(s.label)}</h3>
+        <div class="table-scroll">
+          <table class="vinjeta-table due-soon-table">
+            <thead><tr><th>Tablica</th><th>Element</th><th>Podrobnosti</th></tr></thead>
+            <tbody>${inner}</tbody>
+          </table>
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+
 function getFilteredVehicleIds() {
-  if (filterVehicleId) return [filterVehicleId];
-  return state.vehicles.map((v) => v.id);
+  const active = getActiveVehicles();
+  const activeIds = new Set(active.map((v) => v.id));
+  if (filterVehicleId) {
+    if (!activeIds.has(filterVehicleId)) return [];
+    return [filterVehicleId];
+  }
+  return active.map((v) => v.id);
 }
 
 function refreshSelects() {
-  const vehicleOptions = state.vehicles
+  const activeList = getActiveVehicles();
+  if (filterVehicleId && !activeList.some((v) => v.id === filterVehicleId)) {
+    filterVehicleId = "";
+  }
+
+  const vehicleOptions = activeList
     .map((v) => `<option value="${v.id}">${escapeHtml(v.nickname)} (${v.year} ${v.make} ${v.model})</option>`)
     .join("");
 
@@ -696,11 +1047,12 @@ function refreshVinjetaVehicleSelect() {
   const btn = refs.vinjetaOpenBtn;
   if (!sel || !btn) return;
 
-  const vehicleOptions = state.vehicles
+  const active = getActiveVehicles();
+  const vehicleOptions = active
     .map((v) => `<option value="${v.id}">${escapeHtml(v.nickname)} (${v.year} ${v.make} ${v.model})</option>`)
     .join("");
 
-  if (!state.vehicles.length) {
+  if (!active.length) {
     sel.innerHTML = `<option value="">Ni vozil</option>`;
     sel.disabled = true;
     btn.disabled = true;
@@ -711,14 +1063,14 @@ function refreshVinjetaVehicleSelect() {
   sel.disabled = false;
   sel.innerHTML = `<option value="">Izberi vozilo</option>${vehicleOptions}`;
 
-  if (lastVinjetaVehicleId && state.vehicles.some((v) => v.id === lastVinjetaVehicleId)) {
+  if (lastVinjetaVehicleId && active.some((v) => v.id === lastVinjetaVehicleId)) {
     sel.value = lastVinjetaVehicleId;
-  } else if (filterVehicleId && state.vehicles.some((v) => v.id === filterVehicleId)) {
+  } else if (filterVehicleId && active.some((v) => v.id === filterVehicleId)) {
     sel.value = filterVehicleId;
     lastVinjetaVehicleId = filterVehicleId;
   } else {
-    sel.value = state.vehicles[0].id;
-    lastVinjetaVehicleId = state.vehicles[0].id;
+    sel.value = active[0].id;
+    lastVinjetaVehicleId = active[0].id;
   }
 
   btn.disabled = !sel.value;
@@ -771,24 +1123,541 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+function downloadTextFile(filename, text, mime) {
+  const blob = new Blob(["\uFEFF" + text], { type: mime || "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function csvEscapeCell(val) {
+  const s = String(val ?? "");
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function rowsToCsv(headers, rows) {
+  const h = headers.map(csvEscapeCell).join(",");
+  const body = rows.map((row) => row.map(csvEscapeCell).join(",")).join("\n");
+  return `${h}\n${body}\n`;
+}
+
+function exportAllCsv() {
+  const vHeader = [
+    "id",
+    "nickname",
+    "year",
+    "make",
+    "model",
+    "status",
+    "referenceMarketValue",
+    "baseMileage",
+    "currentMileage"
+  ];
+  const vRows = state.vehicles.map((v) => [
+    v.id,
+    v.nickname,
+    v.year,
+    v.make,
+    v.model,
+    v.status || "active",
+    v.referenceMarketValue ?? "",
+    v.baseMileage ?? "",
+    v.currentMileage ?? ""
+  ]);
+  downloadTextFile("vehicles.csv", rowsToCsv(vHeader, vRows));
+
+  const pHeader = ["id", "vehicleId", "type", "intervalMiles", "intervalDays", "lastServiceDate", "lastServiceMileage", "notes"];
+  const pRows = state.plans.map((p) => [
+    p.id,
+    p.vehicleId,
+    p.type,
+    p.intervalMiles ?? "",
+    p.intervalDays ?? "",
+    p.lastServiceDate ?? "",
+    p.lastServiceMileage ?? "",
+    p.notes ?? ""
+  ]);
+  downloadTextFile("plans.csv", rowsToCsv(pHeader, pRows));
+
+  const rHeader = ["id", "vehicleId", "type", "serviceDate", "mileageAtService", "cost", "shopName", "notes"];
+  const rRows = state.records.map((r) => [
+    r.id,
+    r.vehicleId,
+    r.type,
+    r.serviceDate,
+    r.mileageAtService,
+    r.cost ?? "",
+    r.shopName ?? "",
+    r.notes ?? ""
+  ]);
+  downloadTextFile("records.csv", rowsToCsv(rHeader, rRows));
+
+  void appendAuditLog({ actionType: "csv.export", summary: "Izvoz CSV" });
+}
+
+function parseCsv(text) {
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return { headers: [], rows: [] };
+  const parseLine = (line) => {
+    const out = [];
+    let cur = "";
+    let q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (q) {
+        if (c === '"') {
+          if (line[i + 1] === '"') {
+            cur += '"';
+            i++;
+          } else q = false;
+        } else cur += c;
+      } else if (c === '"') q = true;
+      else if (c === ",") {
+        out.push(cur);
+        cur = "";
+      } else cur += c;
+    }
+    out.push(cur);
+    return out;
+  };
+  const headers = parseLine(lines[0]).map((h) => h.trim());
+  const rows = lines.slice(1).map(parseLine);
+  return { headers, rows };
+}
+
+function syncDocumentsSectionFromRecordSelect() {
+  const form = refs.vaultVehicleForm;
+  const uploadBtn = refs.vaultUploadBtn;
+  const fileInput = refs.vaultFileInput;
+  const vid = refs.recordVehicleSelect?.value?.trim() || "";
+  if (!form) return;
+  if (!vid) {
+    form.hidden = true;
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (fileInput) fileInput.disabled = true;
+    if (refs.vaultDocumentsBody) refs.vaultDocumentsBody.innerHTML = "";
+    if (refs.vaultUploadHint) refs.vaultUploadHint.textContent = "";
+    return;
+  }
+  form.hidden = false;
+  if (uploadBtn) uploadBtn.disabled = false;
+  if (fileInput) fileInput.disabled = false;
+  void renderVaultDocumentsTable();
+}
+
+async function renderVaultDocumentsTable() {
+  const tbody = refs.vaultDocumentsBody;
+  if (!tbody) return;
+  const vid = refs.recordVehicleSelect?.value?.trim() || "";
+  if (!vid) {
+    tbody.innerHTML = "";
+    return;
+  }
+  const db = getFirestoreDb();
+  if (!db) {
+    tbody.innerHTML = '<tr><td colspan="5">Firestore ni na voljo.</td></tr>';
+    return;
+  }
+  try {
+    const snap = await db.collection("vehicle_documents").where("vehicleId", "==", vid).get();
+    const rows = [];
+    snap.forEach((doc) => rows.push({ id: doc.id, ...doc.data() }));
+    rows.sort((a, b) => {
+      const ta = a.uploadedAt?.toMillis ? a.uploadedAt.toMillis() : 0;
+      const tb = b.uploadedAt?.toMillis ? b.uploadedAt.toMillis() : 0;
+      return tb - ta;
+    });
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5">Ni dokumentov.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows
+      .map((r) => {
+        let uploaded = "—";
+        if (r.uploadedAt?.toDate) uploaded = formatDateEuropean(dateToIsoLocal(r.uploadedAt.toDate()));
+        else if (typeof r.uploadedAt === "string") uploaded = formatDateEuropean(r.uploadedAt.slice(0, 10));
+        const exp =
+          r.expiresAt && typeof r.expiresAt === "string"
+            ? formatDateEuropean(r.expiresAt.slice(0, 10))
+            : r.expiresAt?.toDate
+              ? formatDateEuropean(dateToIsoLocal(r.expiresAt.toDate()))
+              : "—";
+        return `<tr>
+        <td>${escapeHtml(r.fileName || "")}</td>
+        <td>${escapeHtml(r.docType || "—")}</td>
+        <td>${escapeHtml(uploaded)}</td>
+        <td>${escapeHtml(exp)}</td>
+        <td><button type="button" class="secondary btn-small vault-open-btn" data-file-path="${encodeURIComponent(r.filePath || "")}">Odpri</button></td>
+      </tr>`;
+      })
+      .join("");
+  } catch (e) {
+    console.error(e);
+    tbody.innerHTML = '<tr><td colspan="5">Napaka pri branju dokumentov.</td></tr>';
+  }
+}
+
+async function uploadVaultSelectedFiles() {
+  const vid = refs.recordVehicleSelect?.value?.trim() || "";
+  const input = refs.vaultFileInput;
+  const storage = typeof window !== "undefined" ? window.__carMaintenanceStorage : null;
+  if (!vid || !input?.files?.length || !storage) {
+    if (refs.vaultUploadHint) refs.vaultUploadHint.textContent = "Izberi vozilo in datoteko.";
+    return;
+  }
+  const db = getFirestoreDb();
+  if (!db) return;
+  if (refs.vaultUploadHint) refs.vaultUploadHint.textContent = "Nalaganje …";
+  try {
+    for (const file of input.files) {
+      const docId = uid();
+      const path = `vehicle-docs/${vid}/${docId}/${file.name}`;
+      const ref = storage.ref(path);
+      await ref.put(file);
+      await db.collection("vehicle_documents").doc(docId).set({
+        vehicleId: vid,
+        filePath: path,
+        fileName: file.name,
+        mimeType: file.type || "",
+        sizeBytes: file.size,
+        docType: "ostalo",
+        uploadedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        expiresAt: null,
+        notes: ""
+      });
+      await appendAuditLog({
+        actionType: "document.upload",
+        entityType: "vehicle",
+        entityId: vid,
+        summary: file.name
+      });
+    }
+    input.value = "";
+    if (refs.vaultUploadHint) refs.vaultUploadHint.textContent = "Naloženo.";
+    await renderVaultDocumentsTable();
+  } catch (e) {
+    console.error(e);
+    if (refs.vaultUploadHint) refs.vaultUploadHint.textContent = "Napaka pri nalaganju.";
+  }
+}
+
+async function openVaultDocument(encodedPath) {
+  const storage = window.__carMaintenanceStorage;
+  const filePath = encodedPath ? decodeURIComponent(encodedPath) : "";
+  if (!storage || !filePath) return;
+  try {
+    const url = await storage.ref(filePath).getDownloadURL();
+    window.open(url, "_blank", "noopener,noreferrer");
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function auditLogEntryTsToDate(ts) {
+  if (!ts) return null;
+  if (typeof ts === "string") {
+    const d = new Date(ts);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof ts.toDate === "function") return ts.toDate();
+  return null;
+}
+
+async function loadAndRenderAuditLog() {
+  const db = getFirestoreDb();
+  if (!db || !refs.auditLogBody) return;
+  const fromVal = refs.auditDateFrom?.value;
+  const toVal = refs.auditDateTo?.value;
+  try {
+    const snap = await db.collection("auditLog").orderBy("ts", "desc").limit(1000).get();
+    let rows = [];
+    snap.forEach((doc) => rows.push({ id: doc.id, ...doc.data() }));
+    const fromD = fromVal ? new Date(`${fromVal}T00:00:00`) : null;
+    const toD = toVal ? new Date(`${toVal}T23:59:59.999`) : null;
+    rows = rows.filter((r) => {
+      const d = auditLogEntryTsToDate(r.ts);
+      if (!d) return false;
+      if (fromD && d < fromD) return false;
+      if (toD && d > toD) return false;
+      return true;
+    });
+    if (!rows.length) {
+      refs.auditLogBody.innerHTML = '<tr><td colspan="4">Ni zapisov.</td></tr>';
+      if (refs.auditLogEmpty) refs.auditLogEmpty.hidden = true;
+      return;
+    }
+    if (refs.auditLogEmpty) refs.auditLogEmpty.hidden = true;
+    refs.auditLogBody.innerHTML = rows
+      .map((r) => {
+        const d = auditLogEntryTsToDate(r.ts);
+        const hh = d
+          ? `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+          : "";
+        const timeStr = d ? `${formatDateEuropean(dateToIsoLocal(d))} ${hh}` : "—";
+        return `<tr>
+        <td>${escapeHtml(timeStr)}</td>
+        <td>${escapeHtml(r.action || "")}</td>
+        <td>${escapeHtml(r.entity || "")}</td>
+        <td>${escapeHtml(r.summary || "")}</td>
+      </tr>`;
+      })
+      .join("");
+  } catch (e) {
+    console.error(e);
+    refs.auditLogBody.innerHTML = `<tr><td colspan="4">Napaka: ${escapeHtml(e.message || String(e))}</td></tr>`;
+  }
+}
+
+async function requestBackupNow() {
+  const db = getFirestoreDb();
+  if (!db) return;
+  try {
+    await db.collection("backup_requests").add({
+      requestedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      source: "ui"
+    });
+    await appendAuditLog({ actionType: "backup.request", summary: "Varnostna kopija zdaj" });
+    await loadSyncStatusFromFirestore();
+    alert("Zahteva za varnostno kopijo poslana. Preveri Firebase Functions.");
+  } catch (e) {
+    console.error(e);
+    alert("Napaka pri zahtevi za kopijo.");
+  }
+}
+
+async function handleCsvImportFile(file) {
+  const text = await file.text();
+  const parsed = parseCsv(text);
+  const name = file.name.toLowerCase();
+  if (name.includes("vehicles")) pendingImportReport = { kind: "vehicles", parsed };
+  else if (name.includes("plans")) pendingImportReport = { kind: "plans", parsed };
+  else if (name.includes("records")) pendingImportReport = { kind: "records", parsed };
+  else {
+    pendingImportReport = { kind: "vehicles", parsed };
+  }
+  if (refs.importPreviewText) {
+    refs.importPreviewText.textContent = JSON.stringify(
+      { headers: parsed.headers, rows: parsed.rows.slice(0, 8) },
+      null,
+      2
+    );
+  }
+  if (refs.importPreview) refs.importPreview.hidden = false;
+}
+
+async function applyPendingCsvImport() {
+  if (!pendingImportReport) return;
+  const { kind, parsed } = pendingImportReport;
+  const { headers, rows } = parsed;
+  const col = (name) => headers.indexOf(name);
+
+  if (kind === "vehicles") {
+    const idI = col("id");
+    if (idI < 0) throw new Error("Manjka stolpec id");
+    for (const row of rows) {
+      const id = row[idI];
+      if (!id) continue;
+      let v = state.vehicles.find((x) => x.id === id);
+      if (!v) {
+        v = {
+          id,
+          nickname: "",
+          year: new Date().getFullYear(),
+          make: "",
+          model: "",
+          referenceMarketValue: null,
+          baseMileage: 0,
+          currentMileage: 0,
+          vinjetaValidUntilSI: null,
+          vinjetaValidUntilAT: null,
+          registracijaValidUntil: null,
+          status: "active",
+          archivedAt: null,
+          archivedReason: null
+        };
+        state.vehicles.push(v);
+      }
+      const ni = col("nickname");
+      const yi = col("year");
+      const mi = col("make");
+      const modi = col("model");
+      const st = col("status");
+      const rv = col("referenceMarketValue");
+      const bm = col("baseMileage");
+      const cm = col("currentMileage");
+      if (ni >= 0) v.nickname = row[ni] || v.nickname;
+      if (yi >= 0) v.year = Number(row[yi]) || v.year;
+      if (mi >= 0) v.make = row[mi] || v.make;
+      if (modi >= 0) v.model = row[modi] || v.model;
+      if (st >= 0 && row[st]) v.status = row[st] === "archived" ? "archived" : "active";
+      if (rv >= 0 && row[rv] !== "") v.referenceMarketValue = Number(row[rv]) || null;
+      if (bm >= 0 && row[bm] !== "") v.baseMileage = Number(row[bm]) || 0;
+      if (cm >= 0 && row[cm] !== "") v.currentMileage = Number(row[cm]) || 0;
+      const recs = state.records.filter((r) => r.vehicleId === v.id);
+      v.currentMileage = computeVehicleCurrentMileage(v, recs);
+    }
+  } else if (kind === "plans") {
+    const idI = col("id");
+    const vidI = col("vehicleId");
+    if (idI < 0 || vidI < 0) throw new Error("Manjkajo stolpci id / vehicleId");
+    for (const row of rows) {
+      const id = row[idI];
+      const vehicleId = row[vidI];
+      if (!id || !vehicleId) continue;
+      let p = state.plans.find((x) => x.id === id);
+      if (!p) {
+        p = { id, vehicleId, type: "Mali servis", intervalMiles: null, intervalDays: null, lastServiceDate: null, lastServiceMileage: null, notes: null };
+        state.plans.push(p);
+      }
+      const ti = col("type");
+      const im = col("intervalMiles");
+      const idd = col("intervalDays");
+      const lsd = col("lastServiceDate");
+      const lsm = col("lastServiceMileage");
+      const no = col("notes");
+      if (ti >= 0) p.type = normalizeServiceTypeName(row[ti]);
+      if (im >= 0 && row[im] !== "") p.intervalMiles = Number(row[im]) || null;
+      if (idd >= 0 && row[idd] !== "") p.intervalDays = Number(row[idd]) || null;
+      if (lsd >= 0 && row[lsd]) p.lastServiceDate = row[lsd].slice(0, 10);
+      if (lsm >= 0 && row[lsm] !== "") p.lastServiceMileage = Number(row[lsm]) || null;
+      if (no >= 0) p.notes = row[no] || null;
+    }
+  } else if (kind === "records") {
+    const idI = col("id");
+    const vidI = col("vehicleId");
+    if (idI < 0 || vidI < 0) throw new Error("Manjkajo stolpci id / vehicleId");
+    for (const row of rows) {
+      const id = row[idI];
+      const vehicleId = row[vidI];
+      if (!id || !vehicleId) continue;
+      let r = state.records.find((x) => x.id === id);
+      if (!r) {
+        r = { id, vehicleId, type: "Mali servis", serviceDate: "", mileageAtService: 0, cost: null, shopName: "", notes: "" };
+        state.records.push(r);
+      }
+      const ti = col("type");
+      const sd = col("serviceDate");
+      const ms = col("mileageAtService");
+      const co = col("cost");
+      const sh = col("shopName");
+      const no = col("notes");
+      if (ti >= 0) r.type = normalizeServiceTypeName(row[ti]);
+      if (sd >= 0) r.serviceDate = row[sd].slice(0, 10);
+      if (ms >= 0) r.mileageAtService = Number(row[ms]) || 0;
+      if (co >= 0 && row[co] !== "") r.cost = Number(row[co]) || null;
+      if (sh >= 0) r.shopName = row[sh] || "";
+      if (no >= 0) r.notes = row[no] || "";
+    }
+    state.vehicles.forEach((veh) => {
+      const recs = state.records.filter((x) => x.vehicleId === veh.id);
+      veh.currentMileage = computeVehicleCurrentMileage(veh, recs);
+    });
+    state.plans.forEach((pl) => recalculatePlanLastService(pl.vehicleId, pl.type));
+  }
+
+  state = migrateState(state);
+  await appendAuditLog({ actionType: "csv.import", summary: `Uvoz ${kind}` });
+  await saveState();
+  pendingImportReport = null;
+  if (refs.importPreview) refs.importPreview.hidden = true;
+  if (refs.csvImportInput) refs.csvImportInput.value = "";
+  renderAll();
+}
+
 function renderVehicles() {
   refs.vehicleList.innerHTML = "";
+  const active = getActiveVehicles();
+  const archived = getArchivedVehicles();
+
   if (!state.vehicles.length) {
     refs.vehicleList.innerHTML = "<p>Še ni dodanih vozil.</p>";
+    if (refs.vehicleArchivedSection) refs.vehicleArchivedSection.hidden = true;
     return;
   }
 
-  state.vehicles.forEach((vehicle) => {
-    const node = refs.vehicleItemTemplate.content.firstElementChild.cloneNode(true);
-    node.querySelector(".vehicle-title").textContent = `${vehicle.nickname} - ${vehicle.year} ${vehicle.make} ${vehicle.model}`;
-    const base = vehicle.baseMileage != null ? vehicle.baseMileage : vehicle.currentMileage;
-    node.querySelector(".vehicle-mileage").textContent = `Trenutni kilometri: ${vehicle.currentMileage.toLocaleString("sl-SI")} (ob vnosu: ${Number(base).toLocaleString("sl-SI")} km)`;
-    const editBtn = node.querySelector('[data-action="edit-vehicle"]');
-    const delBtn = node.querySelector('[data-action="delete-vehicle"]');
-    editBtn.dataset.id = vehicle.id;
-    delBtn.dataset.id = vehicle.id;
-    refs.vehicleList.appendChild(node);
+  if (!active.length) {
+    refs.vehicleList.innerHTML = "<p>Ni aktivnih vozil. Dodaj novo vozilo ali obnovi arhivirano.</p>";
+  } else {
+    active.forEach((vehicle) => {
+      const node = refs.vehicleItemTemplate.content.firstElementChild.cloneNode(true);
+      node.querySelector(".vehicle-title").textContent = `${vehicle.nickname} - ${vehicle.year} ${vehicle.make} ${vehicle.model}`;
+      const base = vehicle.baseMileage != null ? vehicle.baseMileage : vehicle.currentMileage;
+      node.querySelector(".vehicle-mileage").textContent = `Trenutni kilometri: ${vehicle.currentMileage.toLocaleString("sl-SI")} (ob vnosu: ${Number(base).toLocaleString("sl-SI")} km)`;
+      const editBtn = node.querySelector('[data-action="edit-vehicle"]');
+      const archBtn = node.querySelector('[data-action="archive-vehicle"]');
+      const delBtn = node.querySelector('[data-action="delete-vehicle"]');
+      editBtn.dataset.id = vehicle.id;
+      archBtn.dataset.id = vehicle.id;
+      delBtn.dataset.id = vehicle.id;
+      refs.vehicleList.appendChild(node);
+    });
+  }
+
+  if (refs.vehicleArchivedSection && refs.vehicleArchivedList) {
+    if (archived.length) {
+      refs.vehicleArchivedSection.hidden = false;
+      refs.vehicleArchivedList.innerHTML = archived
+        .map(
+          (v) => `
+      <article class="vehicle-item">
+        <div class="vehicle-item-main">
+          <h3 class="vehicle-title">${escapeHtml(v.nickname)} - ${v.year} ${escapeHtml(v.make)} ${escapeHtml(v.model)}</h3>
+          <p class="vehicle-mileage">Arhivirano${
+            v.archivedAt && typeof v.archivedAt === "string"
+              ? ` (${formatDateEuropean(v.archivedAt.slice(0, 10))})`
+              : ""
+          }</p>
+        </div>
+        <div class="item-actions">
+          <button type="button" class="secondary btn-small" data-action="restore-vehicle" data-id="${escapeHtml(v.id)}">Obnovi</button>
+        </div>
+      </article>`
+        )
+        .join("");
+    } else {
+      refs.vehicleArchivedSection.hidden = true;
+      refs.vehicleArchivedList.innerHTML = "";
+    }
+  }
+}
+
+async function archiveVehicleById(vehicleId) {
+  const v = state.vehicles.find((x) => x.id === vehicleId);
+  if (!v || v.status === "archived") return;
+  if (!confirm("Arhivirati to vozilo? Vsi podatki ostanejo shranjeni.")) return;
+  v.status = "archived";
+  v.archivedAt = dateToIsoLocal(new Date());
+  await appendAuditLog({
+    actionType: "vehicle.archive",
+    entityType: "vehicle",
+    entityId: vehicleId,
+    summary: v.nickname
   });
+  if (filterVehicleId === vehicleId) filterVehicleId = "";
+  if (refs.vehicleFormVehicleId.value === vehicleId) cancelVehicleEdit();
+  await saveState();
+  await logAuditEntry("ARHIVIRANO", "Vozilo", `${v.nickname} – ${v.year} ${v.make} ${v.model}`);
+  renderAll();
+}
+
+async function restoreVehicleById(vehicleId) {
+  const v = state.vehicles.find((x) => x.id === vehicleId);
+  if (!v || v.status !== "archived") return;
+  v.status = "active";
+  v.archivedAt = null;
+  v.archivedReason = null;
+  await appendAuditLog({
+    actionType: "vehicle.restore",
+    entityType: "vehicle",
+    entityId: vehicleId,
+    summary: v.nickname
+  });
+  await saveState();
+  await logAuditEntry("OBNOVLJENO", "Vozilo", `${v.nickname} – ${v.year} ${v.make} ${v.model}`);
+  renderAll();
 }
 
 function setVehicleEditMode(editing, vehicleId = "") {
@@ -812,6 +1681,9 @@ function showPanel(panelName) {
       if (leadEl && b.dataset.lead != null) leadEl.textContent = b.dataset.lead;
     }
   });
+  if (panelName === "audit") {
+    void loadAndRenderAuditLog();
+  }
 }
 
 function initPanelNav() {
@@ -850,7 +1722,8 @@ async function deleteVehicleById(vehicleId) {
   if (!confirm("Ali res želiš izbrisati to vozilo? Izbrisani bodo tudi vsi plani in servisni zapisi za to vozilo.")) {
     return;
   }
-  state.vehicles = state.vehicles.filter((v) => v.id !== vehicleId);
+  const v = state.vehicles.find((x) => x.id === vehicleId);
+  state.vehicles = state.vehicles.filter((x) => x.id !== vehicleId);
   state.plans = state.plans.filter((p) => p.vehicleId !== vehicleId);
   state.records = state.records.filter((r) => r.vehicleId !== vehicleId);
   if (filterVehicleId === vehicleId) {
@@ -861,6 +1734,9 @@ async function deleteVehicleById(vehicleId) {
   }
   hidePlanEdit();
   await saveState();
+  if (v) {
+    await logAuditEntry("IZBRISANO", "Vozilo", `${v.nickname} – ${v.year} ${v.make} ${v.model}`);
+  }
   renderAll();
 }
 
@@ -918,24 +1794,61 @@ function renderHistory() {
   }
 
   const sorted = [...list].sort((a, b) => b.serviceDate.localeCompare(a.serviceDate));
-  sorted.forEach((record) => {
+  if (expandedHistoryRecordId && !sorted.some((r) => r.id === expandedHistoryRecordId)) {
+    expandedHistoryRecordId = null;
+  }
+
+  const rows = sorted
+    .map((record) => {
     const vehicle = state.vehicles.find((v) => v.id === record.vehicleId);
-    const item = document.createElement("article");
-    item.className = "history-item";
-    item.innerHTML = `
-      <div class="history-item-main">
-        <p><strong>${escapeHtml(record.type)}</strong> – ${formatDateEuropean(record.serviceDate)}</p>
-        <p>${vehicle ? escapeHtml(vehicle.nickname) : "Neznano vozilo"} pri ${record.mileageAtService.toLocaleString("sl-SI")} km</p>
-        <p>Cena: ${record.cost != null ? `${Number(record.cost).toFixed(2)} EUR` : "ni podatka"} | Servis: ${record.shopName ? escapeHtml(record.shopName) : "ni podatka"}</p>
-        ${record.notes ? `<p>Opombe: ${escapeHtml(record.notes)}</p>` : ""}
-      </div>
-      <div class="item-actions">
-        <button type="button" class="secondary btn-small" data-action="edit-record" data-id="${record.id}">Uredi</button>
-        <button type="button" class="danger btn-small" data-action="delete-record" data-id="${record.id}">Izbriši</button>
-      </div>
-    `;
-    refs.historyList.appendChild(item);
-  });
+      const isOpen = record.id === expandedHistoryRecordId;
+      const vehicleName = vehicle ? escapeHtml(vehicle.nickname) : "Neznano vozilo";
+      const serviceDate = formatDateEuropean(record.serviceDate);
+      const mileage = Number(record.mileageAtService).toLocaleString("sl-SI");
+      const costLabel = record.cost != null ? `${Number(record.cost).toFixed(2)} EUR` : "ni podatka";
+      const shopLabel = record.shopName ? escapeHtml(record.shopName) : "ni podatka";
+      const notesLabel = record.notes ? escapeHtml(record.notes) : "ni podatka";
+      return `
+        <tr class="history-accordion-row${isOpen ? " is-open" : ""}" data-record-id="${record.id}">
+          <td>${escapeHtml(serviceDate)}</td>
+          <td>${vehicleName}</td>
+          <td>${escapeHtml(record.type)}</td>
+          <td>${mileage}</td>
+          <td class="history-accordion-toggle-cell"><span class="history-accordion-toggle" aria-hidden="true">▼</span></td>
+        </tr>
+        <tr class="history-accordion-details-row${isOpen ? " is-open" : ""}"${isOpen ? "" : " hidden"}>
+          <td colspan="5">
+            <div class="history-accordion-details">
+              <p><strong>Cena (EUR):</strong> ${escapeHtml(costLabel)}</p>
+              <p><strong>Servis:</strong> ${shopLabel}</p>
+              <p><strong>Opombe:</strong> ${notesLabel}</p>
+              <div class="item-actions">
+                <button type="button" class="secondary btn-small" data-action="edit-record" data-id="${record.id}">Uredi</button>
+                <button type="button" class="danger btn-small" data-action="delete-record" data-id="${record.id}">Izbriši</button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  refs.historyList.innerHTML = `
+    <div class="table-scroll">
+      <table class="vinjeta-table history-accordion-table">
+        <thead>
+          <tr>
+            <th>Datum</th>
+            <th>Vozilo</th>
+            <th>Vrsta servisa</th>
+            <th>Kilometri</th>
+            <th class="history-accordion-toggle-cell">▼</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
 }
 
 function recalculatePlanLastService(vehicleId, type) {
@@ -1001,12 +1914,14 @@ function startEditRecord(recordId) {
   refs.recordForm.querySelector('[name="shopName"]').value = record.shopName || "";
   refs.recordForm.querySelector('[name="notes"]').value = record.notes || "";
   setRecordEditMode(true, recordId);
+  syncDocumentsSectionFromRecordSelect();
   refs.recordForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function cancelRecordEdit() {
   refs.recordForm.reset();
   setRecordEditMode(false);
+  syncDocumentsSectionFromRecordSelect();
 }
 
 function getChartThemeColors() {
@@ -1188,11 +2103,13 @@ function toggleTheme() {
 function renderAll() {
   refreshSelects();
   renderVehicles();
+  renderDueSoonCard();
   renderDueDashboard();
   renderHistory();
   updateOverviewChart();
   refreshVinjetaPanelUI();
   renderVinjetaEvidenceBlocks();
+  syncDocumentsSectionFromRecordSelect();
 }
 
 refs.filterVehicleSelect.addEventListener("change", () => {
@@ -1267,9 +2184,14 @@ refs.dueDashboard.addEventListener("click", (e) => {
     if (action === "edit-plan") showPlanEdit(id);
     if (action === "delete-plan") {
       if (!confirm("Ali res želiš izbrisati ta plan vzdrževanja?")) return;
+      const plan = state.plans.find((p) => p.id === id);
+      const vehicle = plan ? state.vehicles.find((x) => x.id === plan.vehicleId) : null;
       state.plans = state.plans.filter((p) => p.id !== id);
       hidePlanEdit();
       await saveState();
+      if (plan && vehicle) {
+        await logAuditEntry("IZBRISANO", "Plan", `${vehicle.nickname} – ${plan.type}`);
+      }
       renderAll();
     }
   })();
@@ -1278,22 +2200,38 @@ refs.dueDashboard.addEventListener("click", (e) => {
 refs.historyList.addEventListener("click", (e) => {
   void (async () => {
     const btn = e.target.closest("[data-action]");
-    if (!btn) return;
-    const id = btn.getAttribute("data-id");
-    const action = btn.getAttribute("data-action");
-    if (action === "edit-record") startEditRecord(id);
-    if (action === "delete-record") {
-      if (!confirm("Ali res želiš izbrisati ta servisni zapis?")) return;
-      const rec = state.records.find((r) => r.id === id);
-      state.records = state.records.filter((r) => r.id !== id);
-      if (rec) {
-        recalculatePlanLastService(rec.vehicleId, rec.type);
-        recalculateVehicleMileage(rec.vehicleId);
+    if (btn) {
+      const id = btn.getAttribute("data-id");
+      const action = btn.getAttribute("data-action");
+      if (action === "edit-record") {
+        startEditRecord(id);
+        return;
       }
-      if (refs.recordFormRecordId.value === id) cancelRecordEdit();
-      await saveState();
-      renderAll();
+      if (action === "delete-record") {
+        if (!confirm("Ali res želiš izbrisati ta servisni zapis?")) return;
+        const rec = state.records.find((r) => r.id === id);
+        const vehicle = rec ? state.vehicles.find((x) => x.id === rec.vehicleId) : null;
+        state.records = state.records.filter((r) => r.id !== id);
+        if (rec) {
+          recalculatePlanLastService(rec.vehicleId, rec.type);
+          recalculateVehicleMileage(rec.vehicleId);
+        }
+        if (refs.recordFormRecordId.value === id) cancelRecordEdit();
+        await saveState();
+        if (rec && vehicle) {
+          await logAuditEntry("IZBRISANO", "Servisni zapis", `${vehicle.nickname} – ${rec.type}`);
+        }
+        renderAll();
+        return;
+      }
     }
+
+    const row = e.target.closest("tr.history-accordion-row");
+    if (!row) return;
+    const recordId = row.getAttribute("data-record-id");
+    if (!recordId) return;
+    expandedHistoryRecordId = expandedHistoryRecordId === recordId ? null : recordId;
+    renderHistory();
   })();
 });
 
@@ -1320,6 +2258,10 @@ refs.planEditForm.addEventListener("submit", (e) => {
     const planEditNotes = document.getElementById("planEditNotes");
     plan.notes = planEditNotes && planEditNotes.value.trim() ? planEditNotes.value.trim() : null;
     await saveState();
+    const veh = state.vehicles.find((x) => x.id === plan.vehicleId);
+    if (veh) {
+      await logAuditEntry("UREJENO", "Plan", `${veh.nickname} – ${plan.type}`);
+    }
     hidePlanEdit();
     renderAll();
   })();
@@ -1342,7 +2284,18 @@ refs.vehicleList.addEventListener("click", (e) => {
   const action = btn.getAttribute("data-action");
   if (action === "edit-vehicle") startEditVehicle(id);
   if (action === "delete-vehicle") void deleteVehicleById(id);
+  if (action === "archive-vehicle") void archiveVehicleById(id);
 });
+
+if (refs.vehicleArchivedList) {
+  refs.vehicleArchivedList.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    if (btn.getAttribute("data-action") === "restore-vehicle") {
+      void restoreVehicleById(btn.getAttribute("data-id"));
+    }
+  });
+}
 
 refs.vehicleForm.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -1363,6 +2316,11 @@ refs.vehicleForm.addEventListener("submit", (e) => {
       vehicle.baseMileage = Number(form.get("currentMileage"));
       recalculateVehicleMileage(vehicle.id);
       await saveState();
+      await logAuditEntry(
+        "UREJENO",
+        "Vozilo",
+        `${vehicle.nickname} – ${vehicle.year} ${vehicle.make} ${vehicle.model}`
+      );
       cancelVehicleEdit();
       renderAll();
       return;
@@ -1379,11 +2337,16 @@ refs.vehicleForm.addEventListener("submit", (e) => {
       baseMileage: km,
       currentMileage: km,
       vinjetaValidUntilSI: null,
-      vinjetaValidUntilAT: null
+      vinjetaValidUntilAT: null,
+      registracijaValidUntil: null,
+      status: "active",
+      archivedAt: null,
+      archivedReason: null
     };
     state.vehicles.push(vehicle);
     recalculateVehicleMileage(vehicle.id);
     await saveState();
+    await logAuditEntry("DODANO", "Vozilo", `${vehicle.nickname} – ${vehicle.year} ${vehicle.make} ${vehicle.model}`);
     refs.vehicleForm.reset();
     setVehicleEditMode(false);
     renderAll();
@@ -1412,6 +2375,10 @@ refs.planForm.addEventListener("submit", (e) => {
     }
     state.plans.push(plan);
     await saveState();
+    const veh = state.vehicles.find((x) => x.id === plan.vehicleId);
+    if (veh) {
+      await logAuditEntry("DODANO", "Plan", `${veh.nickname} – ${plan.type}`);
+    }
     refs.planForm.reset();
     renderAll();
   })();
@@ -1453,6 +2420,14 @@ refs.recordForm.addEventListener("submit", (e) => {
         recalculateVehicleMileage(existing.vehicleId);
       }
       await saveState();
+      const vehEd = state.vehicles.find((x) => x.id === existing.vehicleId);
+      if (vehEd) {
+        await logAuditEntry(
+          "UREJENO",
+          "Servisni zapis",
+          `${vehEd.nickname} – ${existing.type} – ${formatDateEuropean(existing.serviceDate)}`
+        );
+      }
       cancelRecordEdit();
       renderAll();
       return;
@@ -1475,11 +2450,81 @@ refs.recordForm.addEventListener("submit", (e) => {
     }
 
     await saveState();
+    const vehNew = state.vehicles.find((x) => x.id === record.vehicleId);
+    if (vehNew) {
+      await logAuditEntry(
+        "DODANO",
+        "Servisni zapis",
+        `${vehNew.nickname} – ${record.type} – ${formatDateEuropean(record.serviceDate)}`
+      );
+    }
     refs.recordForm.reset();
     setRecordEditMode(false);
     renderAll();
   })();
 });
+
+if (refs.recordVehicleSelect) {
+  refs.recordVehicleSelect.addEventListener("change", () => syncDocumentsSectionFromRecordSelect());
+}
+if (refs.vaultUploadBtn) {
+  refs.vaultUploadBtn.addEventListener("click", () => void uploadVaultSelectedFiles());
+}
+if (refs.vaultDocumentsBody) {
+  refs.vaultDocumentsBody.addEventListener("click", (e) => {
+    const btn = e.target.closest(".vault-open-btn");
+    if (!btn) return;
+    const p = btn.getAttribute("data-file-path");
+    if (p) void openVaultDocument(p);
+  });
+}
+if (refs.auditApplyFilterBtn) {
+  refs.auditApplyFilterBtn.addEventListener("click", () => void loadAndRenderAuditLog());
+}
+if (refs.auditQuickRange) {
+  refs.auditQuickRange.addEventListener("change", () => {
+    const quick = refs.auditQuickRange.value;
+    if (!quick) return;
+    const days = Number(quick);
+    if (!Number.isFinite(days) || days <= 0) return;
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - days);
+    const y = start.getFullYear();
+    const m = String(start.getMonth() + 1).padStart(2, "0");
+    const day = String(start.getDate()).padStart(2, "0");
+    if (refs.auditDateFrom) refs.auditDateFrom.value = `${y}-${m}-${day}`;
+    if (refs.auditDateTo) refs.auditDateTo.value = "";
+    void loadAndRenderAuditLog();
+  });
+}
+if (refs.btnExportCsv) {
+  refs.btnExportCsv.addEventListener("click", () => exportAllCsv());
+}
+if (refs.btnImportCsvTrigger && refs.csvImportInput) {
+  refs.btnImportCsvTrigger.addEventListener("click", () => refs.csvImportInput.click());
+}
+if (refs.csvImportInput) {
+  refs.csvImportInput.addEventListener("change", (e) => {
+    const f = e.target.files?.[0];
+    if (f) void handleCsvImportFile(f);
+  });
+}
+if (refs.btnImportApply) {
+  refs.btnImportApply.addEventListener("click", () => {
+    void applyPendingCsvImport().catch((err) => alert(err.message || String(err)));
+  });
+}
+if (refs.btnImportCancel) {
+  refs.btnImportCancel.addEventListener("click", () => {
+    pendingImportReport = null;
+    if (refs.importPreview) refs.importPreview.hidden = true;
+    if (refs.csvImportInput) refs.csvImportInput.value = "";
+  });
+}
+if (refs.btnBackupNow) {
+  refs.btnBackupNow.addEventListener("click", () => void requestBackupNow());
+}
 
 initTheme();
 initZoom();

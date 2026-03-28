@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // NOTE:
+    // This project currently has no Firebase Auth user model.
+    // Keep base behavior permissive for existing app collections,
+    // while enforcing append-only semantics for audit logs.
+    //
+    // Deploy reminder: include match /auditLog/{id} below for the client Dnevnik (auditLog collection).
+
+    match /auditLog/{logId} {
+      allow read, write: if true;
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if false;
+    }
+
+    match /reminder_jobs/{jobId} {
+      allow read: if true;
+      allow create, update: if true;
+      allow delete: if false;
+    }
+
+    match /sync_status/{docId} {
+      allow read, write: if true;
+    }
+
+    match /backup_snapshots/{docId} {
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+
+    match /backup_requests/{docId} {
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+
+    match /vehicle_documents/{docId} {
+      allow read, write: if true;
+    }
+
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

@@ -9,3 +9,4 @@ const firebaseConfig = {
 
 firebase.initializeApp(firebaseConfig);
 window.__carMaintenanceDb = firebase.firestore();
+window.__carMaintenanceStorage = firebase.storage();

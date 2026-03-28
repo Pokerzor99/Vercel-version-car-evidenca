@@ -987,3 +987,121 @@ button.danger:hover {
   color: var(--text-muted);
 }
 
+.history-accordion-table .history-accordion-row {
+  cursor: pointer;
+}
+
+.history-accordion-table .history-accordion-row:hover {
+  background: var(--surface-muted);
+}
+
+.history-accordion-table .history-accordion-toggle-cell {
+  text-align: right;
+  width: 2.5rem;
+}
+
+.history-accordion-toggle {
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+
+.history-accordion-row.is-open .history-accordion-toggle {
+  transform: rotate(180deg);
+}
+
+.history-accordion-details-row td {
+  background: var(--surface-muted);
+}
+
+.history-accordion-details {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.25rem 0;
+  font-size: 0.88rem;
+}
+
+.history-accordion-details p {
+  margin: 0;
+}
+
+.history-accordion-details .item-actions {
+  margin-top: 0.35rem;
+}
+
+.vinjeta-save-feedback {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.75rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.vinjeta-save-feedback--success {
+  color: var(--accent);
+  background: rgba(15, 118, 110, 0.12);
+}
+
+.vinjeta-save-feedback--error {
+  color: var(--danger);
+  background: rgba(185, 28, 28, 0.12);
+}
+
+.overview-due-soon-card {
+  margin-bottom: 1rem;
+}
+
+.due-soon-card-body {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.due-soon-bucket-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.due-soon-table td,
+.due-soon-table th {
+  font-size: 0.85rem;
+}
+
+.vehicle-archived-section {
+  margin-top: 1.25rem;
+}
+
+.vault-panel-form {
+  margin-top: 0.75rem;
+}
+
+.vault-upload-row input[type="file"] {
+  max-width: 100%;
+}
+
+.audit-toolbar {
+  margin-top: 0.75rem;
+}
+
+.sync-status-lines {
+  margin-top: 0.4rem;
+}
+
+.data-panel-actions {
+  margin-top: 0.75rem;
+}
+
+.import-preview {
+  margin-top: 1rem;
+}
+
+.import-preview-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow: auto;
+  font-size: 0.8rem;
+}
+

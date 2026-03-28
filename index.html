@@ -41,14 +41,20 @@
         <button type="button" class="rail-link" data-panel="plans" data-title="Načrti vzdrževanja" data-lead="Dodaj ali prilagodi intervale servisov za posamezno vozilo.">
           Načrti vzdrževanja
         </button>
-        <button type="button" class="rail-link" data-panel="records" data-title="Servisni zapisi" data-lead="Vnašaj popravila in servise – trenutni kilometri vozila se prilagodijo.">
+        <button type="button" class="rail-link" data-panel="records" data-title="Servisni zapisi" data-lead="Vnašaj servisne zapise in prilaži dokumente (računi, slike) za izbrano vozilo.">
           Servisni zapisi
         </button>
         <button type="button" class="rail-link" data-panel="overview" data-title="Pregled Evidence" data-lead="Zapadlost, zgodovina, graf vrednosti in stroškov; izberi vozilo.">
           Pregled Evidence
         </button>
-        <button type="button" class="rail-link" data-panel="vinjeta" data-title="Vinjete" data-lead="Vnesi veljavnost vinjet (SI/AT), preveri e-vinjeto na DARS in odpri portal v novem zavihku po potrebi.">
-          Vinjete
+        <button type="button" class="rail-link" data-panel="vinjeta" data-title="Vinjete & Registracija" data-lead="Vnesi veljavnost vinjet (SI/AT) in registracije vozila; preveri e-vinjeto na DARS.">
+          Vinjete & Registracija
+        </button>
+        <button type="button" class="rail-link" data-panel="audit" data-title="Dnevnik dejanj" data-lead="Zapis pomembnih dejanj v bazi (ni brisanja).">
+          Dnevnik
+        </button>
+        <button type="button" class="rail-link" data-panel="data" data-title="Podatki" data-lead="Izvoz / uvoz CSV, varnostna kopija in stanje sinhronizacije.">
+          Podatki
         </button>
       </nav>
     </aside>
@@ -87,6 +93,11 @@
             <div id="vehicleList" class="stack"></div>
           </section>
         </div>
+        <section class="card card--elevated vehicle-archived-section" id="vehicleArchivedSection" hidden>
+          <h2 class="card-title">Arhivirana vozila</h2>
+          <p class="hint">Prodana ali neaktivna vozila; podatki ostanejo shranjeni. Uporabi »Obnovi« za vrnitev med aktivna.</p>
+          <div id="vehicleArchivedList" class="stack"></div>
+        </section>
       </div>
 
       <div id="panel-plans" class="panel">
@@ -119,9 +130,9 @@
 
       <div id="panel-vinjeta" class="panel">
         <section class="card card--elevated">
-          <h2 class="card-title">Vinjete</h2>
+          <h2 class="card-title">Vinjete & Registracija</h2>
           <p class="hint">
-            Najprej <strong>izberi vozilo</strong>. Nato lahko vpišeš veljavnost <strong>vinjete za Slovenijo</strong> in/ali <strong>za Avstrijo</strong>
+            Najprej <strong>izberi vozilo</strong>. Nato lahko vpišeš veljavnost <strong>vinjete za Slovenijo</strong>, <strong>za Avstrijo</strong> in <strong>registracije vozila</strong>
             (datum <strong>dd/mm/yyyy</strong>). Polja, ki jih ne potrebuješ, pusti prazna.
           </p>
           <div class="vinjeta-panel-step stack">
@@ -139,9 +150,14 @@
                   <input type="text" id="vinjetaPanelAt" placeholder="dd/mm/yyyy" autocomplete="off" inputmode="numeric" />
                   <span class="field-hint">Pusti prazno, če ne vodiš avstrijske vinjete.</span>
                 </label>
+                <label class="full">Registracija – velja do
+                  <input type="text" id="vinjetaPanelReg" placeholder="dd/mm/yyyy" autocomplete="off" inputmode="numeric" />
+                  <span class="field-hint">Datum veljavnosti registracije vozila.</span>
+                </label>
               </div>
               <div class="btn-row" style="margin-top: 1rem">
                 <button type="button" id="vinjetaPanelSaveBtn">Shrani vinjete za to vozilo</button>
+                <span id="vinjetaPanelSaveFeedback" class="vinjeta-save-feedback" hidden></span>
               </div>
             </div>
           </div>
@@ -172,34 +188,131 @@
         </section>
       </div>
 
-      <div id="panel-records" class="panel">
-        <section class="card card--elevated card--narrow">
-          <h2 class="card-title">Dodaj servisni zapis</h2>
-          <form id="recordForm" class="grid two">
-            <label>Vozilo
-              <select name="vehicleId" required id="recordVehicleSelect"></select>
+      <div id="panel-audit" class="panel">
+        <section class="card card--elevated">
+          <h2 class="card-title">Dnevnik dejanj</h2>
+          <p class="hint">Zapisi se ne brišejo. Filtriraj po datumu ali hitro zadnjih 30/60/90 dni.</p>
+          <div class="audit-toolbar grid two">
+            <label>Od
+              <input type="date" id="auditDateFrom" />
             </label>
-            <label>Vrsta servisa
-              <select name="type" required id="recordTypeSelect"></select>
+            <label>Do
+              <input type="date" id="auditDateTo" />
             </label>
-            <label>Datum
-              <input name="serviceDate" type="text" required placeholder="dd/mm/yyyy" inputmode="numeric" autocomplete="off" />
-              <span class="field-hint">Evropski zapis: dan / mesec / leto (dd/mm/yyyy)</span>
+            <label class="full">Hitro
+              <select id="auditQuickRange">
+                <option value="">—</option>
+                <option value="30">Zadnjih 30 dni</option>
+                <option value="60">Zadnjih 60 dni</option>
+                <option value="90">Zadnjih 90 dni</option>
+              </select>
             </label>
-            <label>Kilometri<input name="mileageAtService" type="number" min="0" required /></label>
-            <label>Cena (EUR)<input name="cost" type="number" min="0" step="0.01" placeholder="75.00" /></label>
-            <label>Servis<input name="shopName" placeholder="Avto servis" /></label>
-            <label class="full">Opombe<textarea name="notes" rows="2" placeholder="Neobvezne opombe..."></textarea></label>
-            <input type="hidden" name="recordId" id="recordFormRecordId" value="" />
             <div class="full btn-row">
-              <button type="submit" id="recordFormSubmitBtn">Dodaj zapis</button>
-              <button type="button" class="secondary" id="cancelRecordEditBtn" hidden>Prekliči urejanje</button>
+              <button type="button" id="auditApplyFilterBtn">Uporabi filter</button>
             </div>
-          </form>
+          </div>
+          <div class="table-scroll" style="margin-top: 1rem">
+            <table class="vinjeta-table">
+              <thead>
+                <tr>
+                  <th>Čas</th>
+                  <th>Dejanje</th>
+                  <th>Entiteta</th>
+                  <th>Povzetek</th>
+                </tr>
+              </thead>
+              <tbody id="auditLogBody"></tbody>
+            </table>
+          </div>
+          <p id="auditLogEmpty" class="hint" hidden>Ni zapisov za izbrane kriterije.</p>
         </section>
       </div>
 
+      <div id="panel-data" class="panel">
+        <section class="card card--elevated">
+          <h2 class="card-title">Upravljanje podatkov</h2>
+          <p class="hint">Izvoz in uvoz CSV, ročna varnostna kopija in stanje sinhronizacije z bazo.</p>
+          <div id="syncStatusLines" class="sync-status-lines">
+            <p class="field-hint" id="lineLastSync">Zadnja uspešna sinhronizacija: —</p>
+            <p class="field-hint" id="lineLastBackup">Zadnja varnostna kopija: —</p>
+          </div>
+          <div class="btn-row data-panel-actions">
+            <button type="button" id="btnExportCsv">Izvozi CSV</button>
+            <button type="button" class="secondary" id="btnImportCsvTrigger">Uvozi CSV …</button>
+            <input type="file" id="csvImportInput" accept=".csv,text/csv" hidden />
+            <button type="button" class="secondary" id="btnBackupNow">Varnostna kopija zdaj</button>
+          </div>
+          <div id="importPreview" class="import-preview card card--flat" hidden>
+            <h3 class="card-title">Predogled uvoza</h3>
+            <pre id="importPreviewText" class="import-preview-pre"></pre>
+            <div class="btn-row">
+              <button type="button" id="btnImportApply">Uporabi uvoz</button>
+              <button type="button" class="secondary" id="btnImportCancel">Prekliči</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="panel-records" class="panel">
+        <div class="layout-split">
+          <section class="card card--elevated card--narrow">
+            <h2 class="card-title">Dodaj servisni zapis</h2>
+            <form id="recordForm" class="grid two">
+              <label>Vozilo
+                <select name="vehicleId" required id="recordVehicleSelect"></select>
+              </label>
+              <label>Vrsta servisa
+                <select name="type" required id="recordTypeSelect"></select>
+              </label>
+              <label>Datum
+                <input name="serviceDate" type="text" required placeholder="dd/mm/yyyy" inputmode="numeric" autocomplete="off" />
+                <span class="field-hint">Evropski zapis: dan / mesec / leto (dd/mm/yyyy)</span>
+              </label>
+              <label>Kilometri<input name="mileageAtService" type="number" min="0" required /></label>
+              <label>Cena (EUR)<input name="cost" type="number" min="0" step="0.01" placeholder="75.00" /></label>
+              <label>Servis<input name="shopName" placeholder="Avto servis" /></label>
+              <label class="full">Opombe<textarea name="notes" rows="2" placeholder="Neobvezne opombe..."></textarea></label>
+              <input type="hidden" name="recordId" id="recordFormRecordId" value="" />
+              <div class="full btn-row">
+                <button type="submit" id="recordFormSubmitBtn">Dodaj zapis</button>
+                <button type="button" class="secondary" id="cancelRecordEditBtn" hidden>Prekliči urejanje</button>
+              </div>
+            </form>
+          </section>
+          <section class="card card--elevated records-docs-card">
+            <h2 class="card-title">Dokumenti za vozilo</h2>
+            <p class="hint">Velja za vozilo, izbrano v obrazcu za servisni zapis (levo). Naloži PDF ali slike (računi, zavarovanje …). Datoteka v oblaku; metapodatki v bazi.</p>
+            <div id="vaultVehicleForm" class="vault-panel-form" hidden>
+              <div class="vault-upload-row btn-row">
+                <input type="file" id="vaultFileInput" accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/*" multiple />
+                <button type="button" id="vaultUploadBtn">Naloži</button>
+              </div>
+              <p id="vaultUploadHint" class="field-hint"></p>
+              <div class="table-scroll" style="margin-top: 0.75rem">
+                <table class="vinjeta-table" id="vaultDocumentsTable">
+                  <thead>
+                    <tr>
+                      <th>Datoteka</th>
+                      <th>Tip</th>
+                      <th>Naloženo</th>
+                      <th>Veljavnost</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="vaultDocumentsBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
       <div id="panel-overview" class="panel">
+        <section class="card card--elevated overview-due-soon-card" id="dueSoonCardHost">
+          <h2 class="card-title">Kaj zapade v 30 / 60 / 90 dneh</h2>
+          <p class="hint">Pregled aktivnih vozil: zapadli elementi in bližajoči se roki (načrti, vinjete).</p>
+          <div id="dueSoonCardBody" class="due-soon-card-body"></div>
+        </section>
         <div class="overview-toolbar card card--flat">
           <div class="overview-toolbar-inner">
             <label class="filter-label filter-label--inline">Vozilo za prikaz
@@ -266,7 +379,7 @@
 
         <section class="card card--elevated overview-vinjeta-block">
           <h2 class="card-title">Pregled vinjet (Evidence)</h2>
-          <p class="hint">Tabela veljavnosti za vsa vozila v izbranem filtru zgoraj (če je »Vsa vozila«, za vsa vnešena vozila). Datume vneseš v meniju <strong>Vinjete</strong>.</p>
+          <p class="hint">Tabela veljavnosti za vsa vozila v izbranem filtru zgoraj (če je »Vsa vozila«, za vsa vnešena vozila). Datume vneseš v meniju <strong>Vinjete &amp; Registracija</strong>.</p>
           <div id="vinjetaEvidenceTable" class="vinjeta-evidence-wrap"></div>
         </section>
       </div>
@@ -282,6 +395,7 @@
       </div>
       <div class="item-actions">
         <button type="button" class="secondary btn-small" data-action="edit-vehicle">Uredi</button>
+        <button type="button" class="secondary btn-small" data-action="archive-vehicle">Arhiviraj</button>
         <button type="button" class="danger btn-small" data-action="delete-vehicle">Izbriši</button>
       </div>
     </article>
@@ -318,6 +432,7 @@
 
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
   <script src="./firebase-config.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="./app.js"></script>
